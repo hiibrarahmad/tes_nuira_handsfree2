@@ -300,7 +300,7 @@ static void switch_to_secondary(void)
         return;
     ESP_LOGI(TAG, "Switching to SECONDARY role");
     g_role = ROLE_SECONDARY;
-    // Disable BT connectability/discoverability on secondary to prevent BT connection requests
+    // Disable BT connectability/discoverability on secondary to prevent BT connection requests.
     esp_bt_gap_set_scan_mode(ESP_BT_NON_CONNECTABLE, ESP_BT_NON_DISCOVERABLE);
     if (mic_task_handle) {
         vTaskDelete(mic_task_handle);
@@ -476,6 +476,7 @@ void bt_app_a2d_cb(esp_a2d_cb_event_t event, esp_a2d_cb_param_t *param)
 {
     ESP_LOGI(TAG, "A2DP event: %d", event);
     if (event == ESP_A2D_CONNECTION_STATE_EVT && param->conn_stat.state == 1) { // CONNECTED
+        // When BT is connected, switch to primary and send the handshake (role message)
         switch_to_primary();
     }
 }
@@ -633,7 +634,7 @@ void app_main(void)
     // Initialize NVS.
     ESP_ERROR_CHECK(nvs_flash_init());
  
-    // Initialize ESPNOW (this creates the Wi-Fi STA, starts Wi-Fi, sets channel, and registers ESPNOW callback).
+    // Initialize ESPNOW (creates Wi-Fi STA, starts Wi-Fi, sets channel, and registers ESPNOW callback).
     init_esp_now();
  
     // Initialize I2S speaker and create its semaphore.
@@ -655,34 +656,20 @@ void app_main(void)
     }
     // --- End BT initialization ---
  
-    // Add broadcast peer (for handshake messages).
-    esp_now_peer_info_t broadcast_peer = {0};
-    memset(broadcast_peer.peer_addr, 0xFF, 6);
-    broadcast_peer.channel = ESPNOW_CHANNEL;
-    broadcast_peer.encrypt = false;
-    esp_err_t peer_ret = esp_now_add_peer(&broadcast_peer);
-    if (peer_ret != ESP_OK && peer_ret != ESP_ERR_ESPNOW_EXIST) {
-        ESP_LOGE(TAG, "Failed to add broadcast peer: 0x%x", peer_ret);
-    }
+    /* 
+     * Previously, an initial handshake was sent here.
+     * Now, we wait for the phone to connect via BT.
+     * When a BT connection is established (A2DP callback), switch_to_primary() is called,
+     * which will then send a ROLE_PRIMARY message via ESP-NOW.
+     */
  
-    // Send initial handshake to discover and connect to the other ESP32.
-    const char *handshake = "HANDSHAKE";
-    esp_err_t ret = esp_now_send(broadcast_peer.peer_addr, (const uint8_t *)handshake, strlen(handshake));
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to send handshake: 0x%x", ret);
-    }
- 
-    ESP_LOGI(TAG, "✅ Device started in UNDECIDED mode; waiting for BT connection and ESPNOW handshake...");
+    ESP_LOGI(TAG, "✅ Device started in UNDECIDED mode; waiting for phone BT connection...");
  
     // Optional: Play a startup fancy tune.
     play_fancy_tune();
  
-    // Main loop - tasks and callbacks will manage audio streaming, role switching, and inter-device ESPNOW communication.
+    // Main loop - tasks and callbacks manage audio streaming, role switching, and inter-device ESP-NOW communication.
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
-/******************************************************************************
- * END OF FILE
- ******************************************************************************/
-// This code is a combination of Bluetooth A2DP and HFP audio streaming with ESP-NOW for inter-device communication.
