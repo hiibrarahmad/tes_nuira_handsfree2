@@ -125,7 +125,7 @@ static void hf_client_cb(esp_hf_client_cb_event_t event, esp_hf_client_cb_param_
 static void switch_to_primary(void);
 static void switch_to_secondary(void);
 
-// A task to periodically send handshake messages and enable forwarding if a peer is found.
+// A task to periodically send handshake messages (only in primary)
 static void espnow_timeout_task(void *arg)
 {
     while (g_role == ROLE_PRIMARY) {
@@ -160,7 +160,6 @@ static void espnow_timeout_task(void *arg)
 // The first parameter provides meta info (including sender's MAC) via recv_info->src_addr.
 static void espnow_receive_cb(const esp_now_recv_info_t *recv_info, const uint8_t *data, int data_len)
 {
-    // Extra debugging: log every ESPNOW reception.
     ESP_LOGI(TAG, "ESPNOW received from %02x:%02x:%02x:%02x:%02x:%02x, len: %d, data: %.*s",
              recv_info->src_addr[0], recv_info->src_addr[1], recv_info->src_addr[2],
              recv_info->src_addr[3], recv_info->src_addr[4], recv_info->src_addr[5],
@@ -211,7 +210,6 @@ static void espnow_receive_cb(const esp_now_recv_info_t *recv_info, const uint8_
 // Initialize ESPNOW (using Wi-Fi STA).
 static void init_esp_now(void)
 {
-    // Initialize Wi-Fi using the esp-netif and event loop.
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     esp_netif_create_default_wifi_sta();
@@ -222,7 +220,6 @@ static void init_esp_now(void)
     ESP_ERROR_CHECK(esp_wifi_start());
     ESP_ERROR_CHECK(esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE));
 
-    // Initialize ESPNOW and register the updated callback.
     ESP_ERROR_CHECK(esp_now_init());
     ESP_ERROR_CHECK(esp_now_register_recv_cb(espnow_receive_cb));
 }
@@ -303,7 +300,8 @@ static void switch_to_secondary(void)
         return;
     ESP_LOGI(TAG, "Switching to SECONDARY role");
     g_role = ROLE_SECONDARY;
-    // Optionally deinitialize BT services if the secondary should not advertise.
+    // Disable BT connectability/discoverability on secondary to prevent BT connection requests
+    esp_bt_gap_set_scan_mode(ESP_BT_NON_CONNECTABLE, ESP_BT_NON_DISCOVERABLE);
     if (mic_task_handle) {
         vTaskDelete(mic_task_handle);
         mic_task_handle = NULL;
@@ -632,13 +630,13 @@ static void hf_client_cb(esp_hf_client_cb_event_t event, esp_hf_client_cb_param_
  ******************************************************************************/
 void app_main(void)
 {
-    // Initialize NVS
+    // Initialize NVS.
     ESP_ERROR_CHECK(nvs_flash_init());
  
-    // Initialize ESPNOW (this creates the Wi-Fi STA, starts Wi-Fi, sets channel and registers ESPNOW callback)
+    // Initialize ESPNOW (this creates the Wi-Fi STA, starts Wi-Fi, sets channel, and registers ESPNOW callback).
     init_esp_now();
  
-    // Initialize I2S speaker and create its semaphore
+    // Initialize I2S speaker and create its semaphore.
     i2s_spk_init();
     i2s_spk_mutex = xSemaphoreCreateMutex();
  
@@ -657,7 +655,7 @@ void app_main(void)
     }
     // --- End BT initialization ---
  
-    // Add broadcast peer (for handshake messages)
+    // Add broadcast peer (for handshake messages).
     esp_now_peer_info_t broadcast_peer = {0};
     memset(broadcast_peer.peer_addr, 0xFF, 6);
     broadcast_peer.channel = ESPNOW_CHANNEL;
@@ -667,7 +665,7 @@ void app_main(void)
         ESP_LOGE(TAG, "Failed to add broadcast peer: 0x%x", peer_ret);
     }
  
-    // Send initial handshake to discover and connect to the other ESP32
+    // Send initial handshake to discover and connect to the other ESP32.
     const char *handshake = "HANDSHAKE";
     esp_err_t ret = esp_now_send(broadcast_peer.peer_addr, (const uint8_t *)handshake, strlen(handshake));
     if (ret != ESP_OK) {
@@ -679,8 +677,12 @@ void app_main(void)
     // Optional: Play a startup fancy tune.
     play_fancy_tune();
  
-    // Main loop - tasks and callbacks manage audio streaming, role switching, and inter-device ESPNOW communication.
+    // Main loop - tasks and callbacks will manage audio streaming, role switching, and inter-device ESPNOW communication.
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
+/******************************************************************************
+ * END OF FILE
+ ******************************************************************************/
+// This code is a combination of Bluetooth A2DP and HFP audio streaming with ESP-NOW for inter-device communication.
