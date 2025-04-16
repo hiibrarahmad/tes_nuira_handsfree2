@@ -36,9 +36,11 @@
 #define TAG                     "BT_AUDIO_COMBINED"
 #define BT_DEVICE_NAME          "ESP32-BT-AUDIO"
 
-// BT discoverability/connectability
+// BT discoverability/connectability modes
 #define BT_SCAN_MODE_CONNECTABLE       ESP_BT_CONNECTABLE
 #define BT_SCAN_MODE_DISCOVERABLE      ESP_BT_GENERAL_DISCOVERABLE
+#define BT_SCAN_MODE_NON_CONNECTABLE   ESP_BT_NON_CONNECTABLE
+#define BT_SCAN_MODE_NON_DISCOVERABLE  ESP_BT_NON_DISCOVERABLE
 
 // I2S microphone configuration
 #define I2S_MIC_PORT            I2S_NUM_0
@@ -168,7 +170,7 @@ static void espnow_receive_cb(const esp_now_recv_info_t *recv_info, const uint8_
     if (!data || data_len <= 0)
         return;
     
-    // Check for a role-message.
+    // Check for a role message from a primary.
     if (strncmp((const char *)data, "ROLE_PRIMARY", strlen("ROLE_PRIMARY")) == 0) {
         ESP_LOGI(TAG, "Received ROLE_PRIMARY message; switching to SECONDARY");
         switch_to_secondary();
@@ -197,7 +199,7 @@ static void espnow_receive_cb(const esp_now_recv_info_t *recv_info, const uint8_
         }
     }
     
-    // In secondary mode, any received audio is written directly to I2S.
+    // In secondary mode, forward any received audio directly to I2S.
     if (g_role == ROLE_SECONDARY) {
         size_t bytes_written;
         if (xSemaphoreTake(i2s_spk_mutex, portMAX_DELAY) == pdTRUE) {
@@ -238,10 +240,11 @@ static void switch_to_primary(void)
 {
     if (g_role == ROLE_PRIMARY)
         return;
+
     ESP_LOGI(TAG, "Switching to PRIMARY role");
     g_role = ROLE_PRIMARY;
-    
-    // Deinitialize BLE if necessary.
+
+    // Deinitialize BLE memory if not used.
     ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_BLE));
 
     // Initialize Bluetooth Classic.
@@ -250,46 +253,46 @@ static void switch_to_primary(void)
     ESP_ERROR_CHECK(esp_bt_controller_enable(ESP_BT_MODE_CLASSIC_BT));
     ESP_ERROR_CHECK(esp_bluedroid_init());
     ESP_ERROR_CHECK(esp_bluedroid_enable());
- 
+
     esp_bt_dev_set_device_name(BT_DEVICE_NAME);
     esp_bt_gap_set_scan_mode(BT_SCAN_MODE_CONNECTABLE, BT_SCAN_MODE_DISCOVERABLE);
- 
+
     // Initialize AVRCP and register callback.
     esp_avrc_ct_init();
     esp_avrc_ct_register_callback(bt_avrc_ct_cb);
- 
+
     // Initialize A2DP sink.
     esp_a2d_register_callback(&bt_app_a2d_cb);
     esp_a2d_sink_register_data_callback(bt_app_a2d_data_cb);
     esp_a2d_sink_init();
- 
+
     // Initialize HFP client.
     esp_hf_client_register_callback(hf_client_cb);
     esp_hf_client_init();
- 
+
     // Initialize microphone for primary.
     i2s_mic_init();
- 
+
     // Create ring buffer for A2DP audio if not already created.
     if (a2dp_rb == NULL) {
         a2dp_rb = xRingbufferCreate(A2DP_RINGBUF_SIZE, RINGBUF_TYPE_BYTEBUF);
     }
- 
-    // Create the A2DP playback task if not running.
+
+    // Create the A2DP playback task if not already running.
     if (a2dp_task_handle == NULL) {
         xTaskCreatePinnedToCore(a2dp_task, "a2dp_task", 4096, NULL,
                                 configMAX_PRIORITIES - 1, &a2dp_task_handle, 1);
     }
- 
-    // Broadcast our new role to peers.
+
+    // Now that BT connection is established, broadcast the primary role via ESP-NOW.
     const char *role_msg = "ROLE_PRIMARY";
     esp_err_t ret = esp_now_send((uint8_t*)"\xFF\xFF\xFF\xFF\xFF\xFF",
                                  (const uint8_t *)role_msg, strlen(role_msg));
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to send ROLE_PRIMARY message: 0x%x", ret);
     }
- 
-    // Start a task to periodically check for ESPNOW peer connection.
+
+    // Start a task to periodically verify ESPNOW peer connection.
     xTaskCreate(&espnow_timeout_task, "espnow_timeout_task", 2048, NULL,
                 configMAX_PRIORITIES - 2, NULL);
 }
@@ -298,10 +301,12 @@ static void switch_to_secondary(void)
 {
     if (g_role == ROLE_SECONDARY)
         return;
+
     ESP_LOGI(TAG, "Switching to SECONDARY role");
     g_role = ROLE_SECONDARY;
-    // Disable BT connectability/discoverability on secondary to prevent BT connection requests.
-    esp_bt_gap_set_scan_mode(ESP_BT_NON_CONNECTABLE, ESP_BT_NON_DISCOVERABLE);
+    // Immediately disable BT connectability on this device to avoid phone connection attempts.
+    esp_bt_gap_set_scan_mode(BT_SCAN_MODE_NON_CONNECTABLE, BT_SCAN_MODE_NON_DISCOVERABLE);
+
     if (mic_task_handle) {
         vTaskDelete(mic_task_handle);
         mic_task_handle = NULL;
@@ -647,6 +652,7 @@ void app_main(void)
         if (esp_bt_controller_enable(ESP_BT_MODE_CLASSIC_BT) == ESP_OK) {
             if (esp_bluedroid_init() == ESP_OK && esp_bluedroid_enable() == ESP_OK) {
                 esp_bt_dev_set_device_name(BT_DEVICE_NAME);
+                // In UNDECIDED mode, leave the device connectable/discoverable.
                 esp_bt_gap_set_scan_mode(BT_SCAN_MODE_CONNECTABLE, BT_SCAN_MODE_DISCOVERABLE);
                 ESP_LOGI(TAG, "Bluetooth stack initialized in UNDECIDED mode");
             }
@@ -657,12 +663,10 @@ void app_main(void)
     // --- End BT initialization ---
  
     /* 
-     * Previously, an initial handshake was sent here.
-     * Now, we wait for the phone to connect via BT.
-     * When a BT connection is established (A2DP callback), switch_to_primary() is called,
-     * which will then send a ROLE_PRIMARY message via ESP-NOW.
+     * Wait for the phone to initiate a Bluetooth connection.
+     * When a BT A2DP connection is established, bt_app_a2d_cb() is called,
+     * which in turn calls switch_to_primary().
      */
- 
     ESP_LOGI(TAG, "✅ Device started in UNDECIDED mode; waiting for phone BT connection...");
  
     // Optional: Play a startup fancy tune.
