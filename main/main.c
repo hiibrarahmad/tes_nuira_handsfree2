@@ -205,7 +205,7 @@ static void i2s_mic_init(void) {
     ESP_LOGI(TAG, "🎤 I2S Mic initialized");
 }
 
-// ---------- BT & HFP init & callbacks ----------
+// ---------- BT & HFP   init & callbacks ----------
 
 static void init_bt(void) {
     esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
